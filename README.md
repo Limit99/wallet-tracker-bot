@@ -29,21 +29,26 @@ python bot.py
 | Perintah | Fungsi |
 |---|---|
 | `/start` | info bot |
-| `/add <chain> <address> [label]` | tambah wallet |
+| `/add <address> [label]` | tambah wallet (auto-detect EVM/Solana) |
 | `/list` | lihat wallet |
 | `/remove <address>` | hapus wallet |
-| `/check` | cek manual sekarang |
+| `/check` | cek transaksi manual sekarang |
+| `/balance <address>` | saldo native semua chain EVM / SOL |
+| `/token <address> <contract> [chain]` | saldo token (smart contract) di wallet |
 
-Chain valid: `eth`, `base`, `arb`, `op`, `bsc`, `polygon`, `sol`
+Gak perlu sebut nama chain — cukup tempel address. Address EVM otomatis dipantau di **semua chain** (`eth`, `base`, `arb`, `op`, `bsc`, `polygon`). Address Solana auto-terdeteksi.
 
 Contoh:
 ```
-/add eth 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 vitalik
-/add sol 5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9 usdc
+/add 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 vitalik
+/add 5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9 sol-wallet
+/balance 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+/token 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 eth
 ```
 
 ## Catatan
-- Saat pertama di-add, bot ambil baseline (gak spam histori lama). Notif mulai dari tx berikutnya.
+- Saat pertama di-add, bot catat waktunya. Notif cuma muncul buat transaksi **setelah** wallet ditambahkan.
+- Tiap address EVM di-scan di semua chain tiap polling, jadi awasi rate limit Etherscan (free tier 5 req/detik). Kurangi `CHAINS` di `chains/evm.py` kalau perlu.
 - Bot nge-track transaksi native **dan** token: ERC-20 (EVM, via Etherscan `tokentx`) + SPL (Solana, via `getTransaction` pre/postTokenBalances). Notif IN/OUT lengkap dengan jumlah & symbol/mint.
 - Hati-hati rate limit kalau pakai public Solana RPC; pakai Helius lebih stabil.
 - Buat deploy 24/7: jalankan di VPS pakai `systemd`, `screen`, atau Docker.
