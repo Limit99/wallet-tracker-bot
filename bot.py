@@ -1,19 +1,22 @@
 """
-Telegram Wallet Tracker Bot — support EVM + Solana.
+Telegram Wallet Tracker Bot — support EVM (semua chain) + Solana.
 
 Cara pakai:
-  /start                          -> info bot
-  /add <chain> <address> [label]  -> tambah wallet
-       chain EVM: eth | base | arb | op | bsc | polygon
-       chain Solana: sol
-  /list                           -> lihat wallet yang di-track
-  /remove <address>               -> hapus wallet
-  /check                          -> cek manual sekarang
+  /start                       -> info bot
+  /add <address> [label]       -> tambah wallet (auto-detect EVM/Solana)
+                                  EVM otomatis ke-track di SEMUA chain.
+  /list                        -> lihat wallet yang di-track
+  /remove <address>            -> hapus wallet
+  /check                       -> cek transaksi manual sekarang
+  /balance <address>           -> saldo native (semua chain EVM) / SOL
+  /token <address> <contract> [chain]
+                               -> saldo token (smart contract) di sebuah wallet
 
 Bot otomatis polling tiap POLL_INTERVAL detik dan kirim notif kalau ada tx baru.
 """
 from __future__ import annotations
 import os
+import json
 import logging
 import aiohttp
 from dotenv import load_dotenv
@@ -45,45 +48,42 @@ log = logging.getLogger("wallet-tracker")
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Wallet Tracker Bot*\n\n"
-        "Aku pantau wallet EVM & Solana dan kabarin kalau ada transaksi baru.\n\n"
+        "Tempel address-nya aja, aku auto-detect EVM atau Solana. "
+        "Address EVM otomatis dipantau di *semua chain* (eth, base, arb, op, bsc, polygon).\n\n"
         "*Perintah:*\n"
-        "`/add <chain> <address> [label]`\n"
-        "  chain EVM: eth, base, arb, op, bsc, polygon\n"
-        "  chain Solana: sol\n"
+        "`/add <address> [label]` — tambah wallet\n"
         "`/list` — lihat wallet\n"
         "`/remove <address>` — hapus wallet\n"
-        "`/check` — cek manual sekarang\n\n"
+        "`/check` — cek transaksi manual\n"
+        "`/balance <address>` — saldo native semua chain / SOL\n"
+        "`/token <address> <contract> [chain]` — saldo token (smart contract)\n\n"
         "Contoh:\n"
-        "`/add eth 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 vitalik`\n"
-        "`/add sol 5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9 usdc`",
+        "`/add 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 vitalik`\n"
+        "`/add 5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9 sol-wallet`\n"
+        "`/token 0xd8dA...6045 0xA0b8...eB48 eth`",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = ctx.args
-    if len(args) < 2:
-        await update.message.reply_text("Format: /add <chain> <address> [label]")
+    if not args:
+        await update.message.reply_text("Format: /add <address> [label]")
         return
 
-    chain_arg = args[0].lower()
-    address = args[1]
-    label = " ".join(args[2:]) if len(args) > 2 else None
+    address = args[0]
+    label = " ".join(args[1:]) if len(args) > 1 else None
     chat_id = update.effective_chat.id
 
-    if chain_arg == "sol":
-        if not solana.is_solana_address(address):
-            await update.message.reply_text("⚠️ Address Solana tidak valid.")
-            return
+    if evm.is_evm_address(address):
+        chain = "evm"                         # multichain: scan semua CHAINS
+        kind_msg = "EVM (semua chain)"
+    elif solana.is_solana_address(address):
         chain = "solana"
-    elif chain_arg in evm.CHAINS:
-        if not evm.is_evm_address(address):
-            await update.message.reply_text("⚠️ Address EVM tidak valid (harus 0x...).")
-            return
-        chain = f"evm:{chain_arg}"
+        kind_msg = "Solana"
     else:
         await update.message.reply_text(
-            "⚠️ Chain tidak dikenal. Pilih: eth, base, arb, op, bsc, polygon, sol"
+            "⚠️ Address tidak dikenali. Tempel address EVM (0x...) atau Solana."
         )
         return
 
@@ -91,7 +91,7 @@ async def add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if wallet_id:
         tag = f" ({label})" if label else ""
         await update.message.reply_text(
-            f"✅ Tracking {chain_arg}: `{address}`{tag}\n"
+            f"✅ Tracking {kind_msg}: `{address}`{tag}\n"
             f"Mulai dari sekarang — transaksi sebelum ini diabaikan.",
             parse_mode=ParseMode.MARKDOWN)
     else:
@@ -114,7 +114,8 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = []
     for r in rows:
         tag = f" — {r['label']}" if r["label"] else ""
-        lines.append(f"• `{r['chain']}` {r['address'][:10]}...{r['address'][-6:]}{tag}")
+        kind = "EVM" if r["chain"].startswith("evm") else "SOL"
+        lines.append(f"• [{kind}] `{r['address'][:10]}...{r['address'][-6:]}`{tag}")
     await update.message.reply_text("*Wallet di-track:*\n" + "\n".join(lines),
                                     parse_mode=ParseMode.MARKDOWN)
 
@@ -123,6 +124,72 @@ async def check_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Cek manual...")
     await poll_wallets(ctx.application, only_chat=update.effective_chat.id)
     await update.message.reply_text("Selesai.")
+
+
+async def balance_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Format: /balance <address>")
+        return
+    address = ctx.args[0]
+    await update.message.reply_text("💰 Ambil saldo...")
+    async with aiohttp.ClientSession() as session:
+        if evm.is_evm_address(address):
+            lines = [f"💰 *Saldo native* `{address[:8]}...{address[-6:]}`"]
+            for ckey, cid in evm.CHAINS.items():
+                try:
+                    bal = await evm.fetch_native_balance(session, address, ETHERSCAN_KEY, cid)
+                except Exception:  # noqa: BLE001
+                    continue
+                if bal > 0:
+                    lines.append(f"• {ckey.upper()}: {bal:.6f} {evm.NATIVE_SYMBOL[ckey]}")
+            if len(lines) == 1:
+                lines.append("_Tidak ada saldo native di chain manapun._")
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        elif solana.is_solana_address(address):
+            bal = await solana.fetch_balance(session, SOLANA_RPC, address)
+            await update.message.reply_text(
+                f"💰 `{address[:6]}...{address[-6:]}`\n• SOL: {bal:.6f}",
+                parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("⚠️ Address tidak dikenali.")
+
+
+async def token_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = ctx.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Format: /token <address> <contract> [chain]\n"
+            "chain (EVM): eth, base, arb, op, bsc, polygon (default eth)")
+        return
+    address, contract = args[0], args[1]
+    chain_arg = args[2].lower() if len(args) > 2 else "eth"
+    await update.message.reply_text("🪙 Ambil saldo token...")
+    async with aiohttp.ClientSession() as session:
+        if evm.is_evm_address(address):
+            cid = evm.CHAINS.get(chain_arg, 1)
+            try:
+                bal = await evm.fetch_token_balance(session, address, contract, ETHERSCAN_KEY, cid)
+            except Exception as e:  # noqa: BLE001
+                await update.message.reply_text(f"⚠️ Gagal: {e}")
+                return
+            await update.message.reply_text(
+                f"🪙 Token `{contract[:8]}...{contract[-6:]}` @ {chain_arg.upper()}\n"
+                f"👛 `{address[:8]}...{address[-6:]}`\n"
+                f"Saldo: {bal:,.6f}",
+                parse_mode=ParseMode.MARKDOWN)
+        elif solana.is_solana_address(address):
+            try:
+                bal = await solana.fetch_token_balance(session, SOLANA_RPC, address, contract)
+            except Exception as e:  # noqa: BLE001
+                await update.message.reply_text(f"⚠️ Gagal: {e}")
+                return
+            await update.message.reply_text(
+                f"🪙 Mint `{contract[:6]}...{contract[-4:]}`\n"
+                f"👛 `{address[:6]}...{address[-6:]}`\n"
+                f"Saldo: {bal:,.6f}",
+                parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("⚠️ Address tidak dikenali.")
 
 
 # ---------- polling logic ----------
@@ -141,44 +208,68 @@ async def poll_wallets(app: Application, only_chat: int | None = None):
                 log.warning("Gagal cek wallet %s: %s", r["address"], e)
 
 
+def _evm_key(kind: str, tx: dict) -> str:
+    return f"{kind}:{tx['hash']}:{tx.get('contractAddress','')}:{tx.get('value','')}"
+
+
+async def _check_evm_chain(session, app, r, ckey, chainid, last_marker, added_at):
+    """Cek 1 chain EVM untuk sebuah wallet. Return marker terbaru (atau last_marker)."""
+    address = r["address"]
+    native = await evm.fetch_latest_txs(session, address, ETHERSCAN_KEY, chainid)
+    tokens = await evm.fetch_latest_token_txs(session, address, ETHERSCAN_KEY, chainid)
+
+    events = [("native", tx) for tx in native] + [("token", tx) for tx in tokens]
+    events.sort(key=lambda e: int(e[1].get("timeStamp", "0")), reverse=True)
+    if not events:
+        return last_marker
+
+    newest = _evm_key(*events[0])
+    explorer = evm.EXPLORERS[ckey]
+    symbol = evm.NATIVE_SYMBOL[ckey]
+
+    fresh = []
+    for ev in events:
+        if last_marker and _evm_key(*ev) == last_marker:
+            break
+        if int(ev[1].get("timeStamp", "0")) > added_at:
+            fresh.append(ev)
+
+    for kind, tx in reversed(fresh):
+        body = (evm.format_token_tx(tx, address, explorer) if kind == "token"
+                else evm.format_tx(tx, address, explorer, symbol))
+        msg = f"{_label(r)}⛓️ {ckey.upper()}\n{body}"
+        await app.bot.send_message(r["chat_id"], msg, disable_web_page_preview=True)
+    return newest
+
+
 async def _check_one(session, app, r):
     chain = r["chain"]
     address = r["address"]
     last_seen = r["last_seen"]
-    added_at = r["added_at"] or 0  # gerbang waktu: cuma tx setelah ini yang dinotif
+    added_at = r["added_at"] or 0
 
-    if chain.startswith("evm:"):
-        chain_key = chain.split(":", 1)[1]
-        chainid = evm.CHAINS[chain_key]
-        native = await evm.fetch_latest_txs(session, address, ETHERSCAN_KEY, chainid)
-        tokens = await evm.fetch_latest_token_txs(session, address, ETHERSCAN_KEY, chainid)
+    if chain.startswith("evm"):
+        # last_seen disimpan sebagai JSON dict per-chain: {"eth": marker, ...}
+        try:
+            seen = json.loads(last_seen) if last_seen else {}
+        except (ValueError, TypeError):
+            seen = {}
+        if not isinstance(seen, dict):
+            seen = {}
 
-        # gabung native + token jadi satu timeline, urut terbaru dulu
-        events = []
-        for tx in native:
-            events.append(("native", tx))
-        for tx in tokens:
-            events.append(("token", tx))
-        events.sort(key=lambda e: int(e[1].get("timeStamp", "0")), reverse=True)
-        if not events:
-            return
+        # legacy: row lama "evm:eth" cuma scan chain itu; row baru "evm" scan semua
+        if ":" in chain:
+            chains = {chain.split(":", 1)[1]: evm.CHAINS[chain.split(":", 1)[1]]}
+        else:
+            chains = evm.CHAINS
 
-        def _key(ev):
-            kind, tx = ev
-            return f"{kind}:{tx['hash']}:{tx.get('contractAddress','')}:{tx.get('value','')}"
-
-        newest = _key(events[0])
-        fresh = []
-        for ev in events:
-            if last_seen and _key(ev) == last_seen:
-                break  # sudah pernah dinotif sampai sini
-            if int(ev[1].get("timeStamp", "0")) > added_at:
-                fresh.append(ev)  # cuma yang terjadi setelah wallet ditambahkan
-        for kind, tx in reversed(fresh):
-            body = evm.format_token_tx(tx, address) if kind == "token" else evm.format_tx(tx, address)
-            await app.bot.send_message(r["chat_id"], _label(r) + body,
-                                       disable_web_page_preview=True)
-        storage.set_last_seen(r["id"], newest)
+        for ckey, cid in chains.items():
+            try:
+                seen[ckey] = await _check_evm_chain(
+                    session, app, r, ckey, cid, seen.get(ckey), added_at)
+            except Exception as e:  # noqa: BLE001
+                log.warning("EVM %s %s gagal: %s", ckey, address, e)
+        storage.set_last_seen(r["id"], json.dumps(seen))
 
     elif chain == "solana":
         sigs = await solana.fetch_latest_signatures(session, SOLANA_RPC, address)
@@ -192,7 +283,6 @@ async def _check_one(session, app, r):
             if (s.get("blockTime") or 0) > added_at:
                 fresh.append(s)
         for s in reversed(fresh):
-            # coba ambil detail token transfer; fallback ke notif generic
             detail = await solana.fetch_transaction(session, SOLANA_RPC, s["signature"])
             changes = solana.extract_token_changes(detail, address)
             if changes:
@@ -223,6 +313,8 @@ def main():
     app.add_handler(CommandHandler("remove", remove))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("check", check_cmd))
+    app.add_handler(CommandHandler("balance", balance_cmd))
+    app.add_handler(CommandHandler("token", token_cmd))
 
     app.job_queue.run_repeating(poll_job, interval=POLL_INTERVAL, first=10)
 
