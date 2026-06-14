@@ -1,4 +1,5 @@
 """Polling transaksi Solana lewat JSON-RPC (getSignaturesForAddress)."""
+from __future__ import annotations
 import aiohttp
 
 # Base58 alphabet (tanpa 0, O, I, l)
