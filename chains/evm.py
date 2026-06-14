@@ -1,9 +1,10 @@
-"""Polling transaksi EVM lewat Etherscan V2 multichain API.
+"""Polling transaksi & cek balance EVM lewat Etherscan V2 multichain API.
 
-Satu API key Etherscan bisa dipakai untuk semua chain EVM yang didukung
-(Ethereum, Base, Arbitrum, Optimism, BSC, Polygon, dll) cuma dengan
-ganti parameter chainid.
+Satu API key Etherscan dipakai untuk semua chain EVM cukup dengan ganti
+parameter chainid. Tidak perlu sebut nama chain saat add address — bot
+otomatis scan semua chain di bawah ini.
 """
+from __future__ import annotations
 import aiohttp
 
 BASE_URL = "https://api.etherscan.io/v2/api"
@@ -18,69 +19,113 @@ CHAINS = {
     "polygon": 137,
 }
 
+EXPLORERS = {
+    "eth": "https://etherscan.io",
+    "base": "https://basescan.org",
+    "arb": "https://arbiscan.io",
+    "op": "https://optimistic.etherscan.io",
+    "bsc": "https://bscscan.com",
+    "polygon": "https://polygonscan.com",
+}
+
+NATIVE_SYMBOL = {
+    "eth": "ETH", "base": "ETH", "arb": "ETH",
+    "op": "ETH", "bsc": "BNB", "polygon": "POL",
+}
+
 
 def is_evm_address(addr: str) -> bool:
     return addr.startswith("0x") and len(addr) == 42
 
 
-async def fetch_latest_txs(session: aiohttp.ClientSession, address: str,
-                           api_key: str, chainid: int = 1, limit: int = 5):
-    """Ambil transaksi normal terbaru untuk sebuah address EVM."""
-    params = {
-        "chainid": chainid,
-        "module": "account",
-        "action": "txlist",
-        "address": address,
-        "startblock": 0,
-        "endblock": 99999999,
-        "page": 1,
-        "offset": limit,
-        "sort": "desc",
-        "apikey": api_key,
-    }
+async def _get(session: aiohttp.ClientSession, params: dict):
     async with session.get(BASE_URL, params=params, timeout=30) as resp:
-        data = await resp.json()
+        return await resp.json()
+
+
+# ---------- transaksi ----------
+
+async def fetch_latest_txs(session, address, api_key, chainid=1, limit=5):
+    """Transaksi native terbaru untuk sebuah address EVM."""
+    data = await _get(session, {
+        "chainid": chainid, "module": "account", "action": "txlist",
+        "address": address, "startblock": 0, "endblock": 99999999,
+        "page": 1, "offset": limit, "sort": "desc", "apikey": api_key,
+    })
     if data.get("status") != "1" or not isinstance(data.get("result"), list):
         return []
     return data["result"]
 
 
-def format_tx(tx: dict, address: str, explorer: str = "https://etherscan.io") -> str:
+async def fetch_latest_token_txs(session, address, api_key, chainid=1, limit=5):
+    """Transfer ERC-20 terbaru untuk sebuah address EVM."""
+    data = await _get(session, {
+        "chainid": chainid, "module": "account", "action": "tokentx",
+        "address": address, "startblock": 0, "endblock": 99999999,
+        "page": 1, "offset": limit, "sort": "desc", "apikey": api_key,
+    })
+    if data.get("status") != "1" or not isinstance(data.get("result"), list):
+        return []
+    return data["result"]
+
+
+# ---------- balance ----------
+
+async def fetch_native_balance(session, address, api_key, chainid=1) -> float:
+    """Saldo native (ETH/BNB/POL) dalam satuan utuh."""
+    data = await _get(session, {
+        "chainid": chainid, "module": "account", "action": "balance",
+        "address": address, "tag": "latest", "apikey": api_key,
+    })
+    if data.get("status") != "1":
+        return 0.0
+    return int(data["result"]) / 1e18
+
+
+async def fetch_token_balance(session, address, contract, api_key, chainid=1) -> float:
+    """Saldo ERC-20 (smart contract) untuk sebuah wallet, dalam satuan utuh."""
+    data = await _get(session, {
+        "chainid": chainid, "module": "account", "action": "tokenbalance",
+        "contractaddress": contract, "address": address, "tag": "latest",
+        "apikey": api_key,
+    })
+    if data.get("status") != "1":
+        return 0.0
+    decimals = await fetch_token_decimals(session, contract, api_key, chainid)
+    return int(data["result"]) / (10 ** decimals)
+
+
+async def fetch_token_decimals(session, contract, api_key, chainid=1) -> int:
+    """Ambil decimals token via eth_call decimals() (free-tier friendly)."""
+    data = await _get(session, {
+        "chainid": chainid, "module": "proxy", "action": "eth_call",
+        "to": contract, "data": "0x313ce567", "tag": "latest", "apikey": api_key,
+    })
+    result = data.get("result")
+    if not result or result == "0x":
+        return 18
+    try:
+        return int(result, 16)
+    except ValueError:
+        return 18
+
+
+# ---------- formatting ----------
+
+def format_tx(tx: dict, address: str, explorer: str, symbol: str = "ETH") -> str:
     address = address.lower()
     direction = "📤 OUT" if tx["from"].lower() == address else "📥 IN"
-    value_eth = int(tx.get("value", "0")) / 1e18
+    value = int(tx.get("value", "0")) / 1e18
     counterpart = tx["to"] if direction.endswith("OUT") else tx["from"]
     short = f"{counterpart[:8]}...{counterpart[-6:]}" if counterpart else "contract"
     return (
-        f"{direction}  {value_eth:.6f} (native)\n"
+        f"{direction}  {value:.6f} {symbol}\n"
         f"↔️ {short}\n"
         f"🔗 {explorer}/tx/{tx['hash']}"
     )
 
 
-async def fetch_latest_token_txs(session: aiohttp.ClientSession, address: str,
-                                 api_key: str, chainid: int = 1, limit: int = 5):
-    """Ambil transfer ERC-20 terbaru untuk sebuah address EVM."""
-    params = {
-        "chainid": chainid,
-        "module": "account",
-        "action": "tokentx",
-        "address": address,
-        "startblock": 0,
-        "endblock": 99999999,
-        "page": 1,
-        "offset": limit,
-        "sort": "desc",
-        "apikey": api_key,
-    }
-    async with session.get(BASE_URL, params=params, timeout=30) as resp:
-        data = await resp.json()
-    if data.get("status") != "1" or not isinstance(data.get("result"), list):
-        return []
-    return data["result"]
-
-
-def format_token_tx(tx: dict, address: str, explorer: str = "https://etherscan.io") -> str:
+def format_token_tx(tx: dict, address: str, explorer: str) -> str:
     address = address.lower()
     direction = "📤 OUT" if tx["from"].lower() == address else "📥 IN"
     try:
