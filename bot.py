@@ -12,6 +12,7 @@ Cara pakai:
 
 Bot otomatis polling tiap POLL_INTERVAL detik dan kirim notif kalau ada tx baru.
 """
+from __future__ import annotations
 import os
 import logging
 import aiohttp
@@ -86,11 +87,13 @@ async def add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    ok = storage.add_wallet(chat_id, chain, address, label)
-    if ok:
+    wallet_id = storage.add_wallet(chat_id, chain, address, label)
+    if wallet_id:
         tag = f" ({label})" if label else ""
-        await update.message.reply_text(f"✅ Tracking {chain_arg}: `{address}`{tag}",
-                                        parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"✅ Tracking {chain_arg}: `{address}`{tag}\n"
+            f"Mulai dari sekarang — transaksi sebelum ini diabaikan.",
+            parse_mode=ParseMode.MARKDOWN)
     else:
         await update.message.reply_text("ℹ️ Wallet itu sudah ada di list.")
 
@@ -142,6 +145,7 @@ async def _check_one(session, app, r):
     chain = r["chain"]
     address = r["address"]
     last_seen = r["last_seen"]
+    added_at = r["added_at"] or 0  # gerbang waktu: cuma tx setelah ini yang dinotif
 
     if chain.startswith("evm:"):
         chain_key = chain.split(":", 1)[1]
@@ -155,7 +159,7 @@ async def _check_one(session, app, r):
             events.append(("native", tx))
         for tx in tokens:
             events.append(("token", tx))
-        events.sort(key=lambda e: int(e[1].get("blockNumber", "0")), reverse=True)
+        events.sort(key=lambda e: int(e[1].get("timeStamp", "0")), reverse=True)
         if not events:
             return
 
@@ -164,19 +168,14 @@ async def _check_one(session, app, r):
             return f"{kind}:{tx['hash']}:{tx.get('contractAddress','')}:{tx.get('value','')}"
 
         newest = _key(events[0])
-        if last_seen is None:
-            storage.set_last_seen(r["id"], newest)  # baseline, jangan spam histori
-            return
         fresh = []
         for ev in events:
-            if _key(ev) == last_seen:
-                break
-            fresh.append(ev)
+            if last_seen and _key(ev) == last_seen:
+                break  # sudah pernah dinotif sampai sini
+            if int(ev[1].get("timeStamp", "0")) > added_at:
+                fresh.append(ev)  # cuma yang terjadi setelah wallet ditambahkan
         for kind, tx in reversed(fresh):
-            if kind == "token":
-                body = evm.format_token_tx(tx, address)
-            else:
-                body = evm.format_tx(tx, address)
+            body = evm.format_token_tx(tx, address) if kind == "token" else evm.format_tx(tx, address)
             await app.bot.send_message(r["chat_id"], _label(r) + body,
                                        disable_web_page_preview=True)
         storage.set_last_seen(r["id"], newest)
@@ -186,14 +185,12 @@ async def _check_one(session, app, r):
         if not sigs:
             return
         newest = sigs[0]["signature"]
-        if last_seen is None:
-            storage.set_last_seen(r["id"], newest)
-            return
         fresh = []
         for s in sigs:
-            if s["signature"] == last_seen:
+            if last_seen and s["signature"] == last_seen:
                 break
-            fresh.append(s)
+            if (s.get("blockTime") or 0) > added_at:
+                fresh.append(s)
         for s in reversed(fresh):
             # coba ambil detail token transfer; fallback ke notif generic
             detail = await solana.fetch_transaction(session, SOLANA_RPC, s["signature"])
