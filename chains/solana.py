@@ -82,3 +82,34 @@ def format_token_change(signature: str, owner: str, changes: list[str]) -> str:
         f"{body}\n"
         f"🔗 https://solscan.io/tx/{signature}"
     )
+
+
+async def fetch_balance(session: aiohttp.ClientSession, rpc_url: str, address: str) -> float:
+    """Saldo SOL (dalam satuan SOL, bukan lamports)."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]}
+    async with session.post(rpc_url, json=payload, timeout=30) as resp:
+        data = await resp.json()
+    lamports = ((data.get("result") or {}).get("value")) or 0
+    return lamports / 1e9
+
+
+async def fetch_token_balance(session: aiohttp.ClientSession, rpc_url: str,
+                              owner: str, mint: str) -> float:
+    """Saldo SPL token (smart contract / mint) untuk sebuah owner."""
+    payload = {
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            owner,
+            {"mint": mint},
+            {"encoding": "jsonParsed"},
+        ],
+    }
+    async with session.post(rpc_url, json=payload, timeout=30) as resp:
+        data = await resp.json()
+    accounts = ((data.get("result") or {}).get("value")) or []
+    total = 0.0
+    for acc in accounts:
+        info = acc["account"]["data"]["parsed"]["info"]["tokenAmount"]
+        total += float(info.get("uiAmount") or 0)
+    return total
